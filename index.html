@@ -64,6 +64,65 @@
     #enter-vr-hint.visible {
       opacity: 1;
     }
+    #controls {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.85);
+      color: #fff;
+      padding: 16px;
+      border-radius: 10px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      font-size: 0.85rem;
+      z-index: 200;
+      min-width: 260px;
+      backdrop-filter: blur(10px);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    #controls.hidden { display: none; }
+    #controls h2 {
+      margin: 0 0 12px 0;
+      font-size: 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #controls label {
+      display: block;
+      margin-bottom: 10px;
+    }
+    #controls label span {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 3px;
+      opacity: 0.8;
+    }
+    #controls input[type=range] {
+      width: 100%;
+      accent-color: #4af;
+    }
+    #controls .desc {
+      font-size: 0.75rem;
+      opacity: 0.5;
+      margin-top: 1px;
+      margin-bottom: 8px;
+    }
+    #toggle-btn {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      z-index: 201;
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      font-size: 0.85rem;
+    }
+    #toggle-btn.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -75,19 +134,65 @@
 
   <div id="enter-vr-hint">Click the VR goggles icon (bottom right) to enter immersive mode</div>
 
+  <button id="toggle-btn" class="hidden" onclick="toggleControls()">⚙ Settings</button>
+  <div id="controls" class="hidden">
+    <h2>Panorama Settings <button onclick="toggleControls()" style="background:none;border:none;color:#fff;cursor:pointer;font-size:1.2rem;">✕</button></h2>
+
+    <label>
+      <span>Sky Radius <b id="val-radius">10</b></span>
+      <input type="range" id="ctrl-radius" min="2" max="500" value="10" step="1">
+    </label>
+    <div class="desc">Smaller = objects feel closer & more intimate. Larger = flat/distant.</div>
+
+    <label>
+      <span>Segments (detail) <b id="val-segments">128</b></span>
+      <input type="range" id="ctrl-segments" min="16" max="256" value="128" step="8">
+    </label>
+    <div class="desc">Higher = smoother sphere, less distortion at edges.</div>
+
+    <label>
+      <span>Camera Height <b id="val-height">1.6</b></span>
+      <input type="range" id="ctrl-height" min="0.5" max="3.0" value="1.6" step="0.05">
+    </label>
+    <div class="desc">Match the tripod height the photo was taken from.</div>
+
+    <label>
+      <span>Rotation Y° <b id="val-rotation">-90</b></span>
+      <input type="range" id="ctrl-rotation" min="-180" max="180" value="-90" step="1">
+    </label>
+    <div class="desc">Rotate the panorama to set the initial forward direction.</div>
+
+    <label>
+      <span>Tone Mapping Exposure <b id="val-exposure">1.0</b></span>
+      <input type="range" id="ctrl-exposure" min="0.2" max="3.0" value="1.0" step="0.05">
+    </label>
+    <div class="desc">Adjust brightness. Higher = brighter, more vivid.</div>
+  </div>
+
   <a-scene
     vr-mode-ui="enabled: true"
     webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor, hand-tracking"
     loading-screen="enabled: false"
-    renderer="colorManagement: true; sortObjects: true; antialias: true"
+    renderer="colorManagement: true; sortObjects: true; antialias: true; toneMapping: ACESFilmic; toneMappingExposure: 1.0; physicallyCorrectLights: true"
   >
     <a-assets timeout="60000">
       <img id="panorama" src="panorama_test.jpg" crossorigin="anonymous">
     </a-assets>
 
-    <a-sky src="#panorama" rotation="0 -90 0"></a-sky>
+    <a-sky
+      id="sky"
+      src="#panorama"
+      rotation="0 -90 0"
+      radius="10"
+      segments-height="128"
+      segments-width="128"
+    ></a-sky>
 
-    <a-camera position="0 1.6 0" look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true">
+    <a-camera
+      id="cam"
+      position="0 1.6 0"
+      look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true"
+    >
     </a-camera>
   </a-scene>
 
@@ -96,10 +201,54 @@
     const hint = document.getElementById('enter-vr-hint');
     const scene = document.querySelector('a-scene');
     const img = document.querySelector('#panorama');
+    const sky = document.getElementById('sky');
+    const cam = document.getElementById('cam');
+    const controlsPanel = document.getElementById('controls');
+    const toggleBtn = document.getElementById('toggle-btn');
+
+    function toggleControls() {
+      const isHidden = controlsPanel.classList.contains('hidden');
+      controlsPanel.classList.toggle('hidden');
+      toggleBtn.classList.toggle('hidden', !controlsPanel.classList.contains('hidden'));
+    }
+
+    // Sky radius
+    document.getElementById('ctrl-radius').addEventListener('input', function() {
+      document.getElementById('val-radius').textContent = this.value;
+      sky.setAttribute('radius', parseFloat(this.value));
+    });
+
+    // Segments (need to rebuild geometry)
+    document.getElementById('ctrl-segments').addEventListener('input', function() {
+      const v = parseInt(this.value);
+      document.getElementById('val-segments').textContent = v;
+      sky.setAttribute('segments-height', v);
+      sky.setAttribute('segments-width', v);
+    });
+
+    // Camera height
+    document.getElementById('ctrl-height').addEventListener('input', function() {
+      document.getElementById('val-height').textContent = this.value;
+      cam.setAttribute('position', {x: 0, y: parseFloat(this.value), z: 0});
+    });
+
+    // Rotation
+    document.getElementById('ctrl-rotation').addEventListener('input', function() {
+      document.getElementById('val-rotation').textContent = this.value;
+      sky.setAttribute('rotation', {x: 0, y: parseFloat(this.value), z: 0});
+    });
+
+    // Tone mapping exposure
+    document.getElementById('ctrl-exposure').addEventListener('input', function() {
+      const v = parseFloat(this.value);
+      document.getElementById('val-exposure').textContent = v.toFixed(2);
+      scene.renderer.toneMappingExposure = v;
+    });
 
     // Hide loading screen when image is loaded
     img.addEventListener('load', () => {
       loadingScreen.classList.add('hidden');
+      toggleBtn.classList.remove('hidden');
       setTimeout(() => {
         hint.classList.add('visible');
       }, 500);
@@ -112,6 +261,7 @@
     scene.addEventListener('loaded', () => {
       setTimeout(() => {
         loadingScreen.classList.add('hidden');
+        toggleBtn.classList.remove('hidden');
         hint.classList.add('visible');
         setTimeout(() => {
           hint.classList.remove('visible');
@@ -119,9 +269,16 @@
       }, 1000);
     });
 
-    // Hide hint when entering VR
+    // Hide controls when entering VR
     scene.addEventListener('enter-vr', () => {
       hint.classList.remove('visible');
+      controlsPanel.classList.add('hidden');
+      toggleBtn.classList.add('hidden');
+    });
+
+    // Show toggle button when exiting VR
+    scene.addEventListener('exit-vr', () => {
+      toggleBtn.classList.remove('hidden');
     });
   </script>
 </body>
