@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VR Panorama Viewer</title>
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.5.0/dist/aframe-extras.min.js"></script>
   <style>
     body { margin: 0; overflow: hidden; }
     #loading-screen {
@@ -188,12 +189,50 @@
       segments-width="128"
     ></a-sky>
 
-    <a-camera
-      id="cam"
-      position="0 1.6 0"
-      look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true"
-    >
-    </a-camera>
+    <a-entity id="rig" position="0 0 0">
+      <a-camera
+        id="cam"
+        position="0 1.6 0"
+        look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true"
+      >
+      </a-camera>
+
+      <!-- Left hand: controller model + hand tracking -->
+      <a-entity
+        id="left-hand"
+        hand-tracking-controls="hand: left; modelStyle: mesh; modelColor: #ffffff"
+      ></a-entity>
+      <a-entity
+        id="left-controller"
+        laser-controls="hand: left; model: true"
+        raycaster="enabled: false"
+      ></a-entity>
+
+      <!-- Right hand: controller model + hand tracking -->
+      <a-entity
+        id="right-hand"
+        hand-tracking-controls="hand: right; modelStyle: mesh; modelColor: #ffffff"
+      ></a-entity>
+      <a-entity
+        id="right-controller"
+        laser-controls="hand: right; model: true"
+        raycaster="enabled: false"
+      ></a-entity>
+    </a-entity>
+
+    <!-- VR HUD: zoom indicator -->
+    <a-entity id="vr-hud" visible="false">
+      <a-text
+        id="zoom-text"
+        value="Zoom: 1.0x"
+        position="0 2.5 -2"
+        align="center"
+        color="#ffffff"
+        width="3"
+        opacity="0.7"
+        look-at="[camera]"
+      ></a-text>
+    </a-entity>
   </a-scene>
 
   <script>
@@ -205,6 +244,106 @@
     const cam = document.getElementById('cam');
     const controlsPanel = document.getElementById('controls');
     const toggleBtn = document.getElementById('toggle-btn');
+    const vrHud = document.getElementById('vr-hud');
+    const zoomText = document.getElementById('zoom-text');
+
+    // Zoom state
+    let currentZoom = 1.0;
+    const MIN_ZOOM = 0.5;
+    const MAX_ZOOM = 4.0;
+    const ZOOM_SPEED = 0.02;
+    let zoomHudTimeout = null;
+    let baseRadius = 10;
+
+    function applyZoom() {
+      currentZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom));
+      const newRadius = baseRadius / currentZoom;
+      sky.setAttribute('radius', newRadius);
+      zoomText.setAttribute('value', 'Zoom: ' + currentZoom.toFixed(1) + 'x');
+      showZoomHud();
+    }
+
+    function showZoomHud() {
+      vrHud.setAttribute('visible', true);
+      clearTimeout(zoomHudTimeout);
+      zoomHudTimeout = setTimeout(() => {
+        vrHud.setAttribute('visible', false);
+      }, 1500);
+    }
+
+    // Thumbstick zoom (controllers)
+    const rightController = document.getElementById('right-controller');
+    const leftController = document.getElementById('left-controller');
+
+    rightController.addEventListener('thumbstickmoved', (evt) => {
+      const y = evt.detail.y;
+      if (Math.abs(y) > 0.1) {
+        currentZoom += -y * ZOOM_SPEED * 2;
+        applyZoom();
+      }
+    });
+
+    leftController.addEventListener('thumbstickmoved', (evt) => {
+      const y = evt.detail.y;
+      if (Math.abs(y) > 0.1) {
+        currentZoom += -y * ZOOM_SPEED * 2;
+        applyZoom();
+      }
+    });
+
+    // Pinch zoom (hand tracking)
+    let lastPinchDistance = null;
+
+    const leftHand = document.getElementById('left-hand');
+    const rightHand = document.getElementById('right-hand');
+
+    let leftPinching = false;
+    let rightPinching = false;
+    let leftPos = null;
+    let rightPos = null;
+
+    leftHand.addEventListener('pinchstarted', () => { leftPinching = true; });
+    leftHand.addEventListener('pinchended', () => { leftPinching = false; lastPinchDistance = null; });
+    rightHand.addEventListener('pinchstarted', () => { rightPinching = true; });
+    rightHand.addEventListener('pinchended', () => { rightPinching = false; lastPinchDistance = null; });
+
+    leftHand.addEventListener('pinchmoved', (evt) => {
+      leftPos = evt.detail.position;
+      handleTwoHandPinch();
+    });
+    rightHand.addEventListener('pinchmoved', (evt) => {
+      rightPos = evt.detail.position;
+      handleTwoHandPinch();
+    });
+
+    function handleTwoHandPinch() {
+      if (leftPinching && rightPinching && leftPos && rightPos) {
+        const dx = leftPos.x - rightPos.x;
+        const dy = leftPos.y - rightPos.y;
+        const dz = leftPos.z - rightPos.z;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (lastPinchDistance !== null) {
+          const delta = dist - lastPinchDistance;
+          currentZoom += delta * 3;
+          applyZoom();
+        }
+        lastPinchDistance = dist;
+      }
+    }
+
+    // Trigger zoom: single-hand pinch on right hand = zoom in, left = zoom out
+    rightHand.addEventListener('pinchstarted', () => {
+      if (!leftPinching) {
+        currentZoom += 0.2;
+        applyZoom();
+      }
+    });
+    leftHand.addEventListener('pinchstarted', () => {
+      if (!rightPinching) {
+        currentZoom -= 0.2;
+        applyZoom();
+      }
+    });
 
     function toggleControls() {
       const isHidden = controlsPanel.classList.contains('hidden');
@@ -215,7 +354,8 @@
     // Sky radius
     document.getElementById('ctrl-radius').addEventListener('input', function() {
       document.getElementById('val-radius').textContent = this.value;
-      sky.setAttribute('radius', parseFloat(this.value));
+      baseRadius = parseFloat(this.value);
+      sky.setAttribute('radius', baseRadius / currentZoom);
     });
 
     // Segments (need to rebuild geometry)
@@ -269,7 +409,7 @@
       }, 1000);
     });
 
-    // Hide controls when entering VR
+    // Hide controls when entering VR, show HUD
     scene.addEventListener('enter-vr', () => {
       hint.classList.remove('visible');
       controlsPanel.classList.add('hidden');
@@ -279,6 +419,7 @@
     // Show toggle button when exiting VR
     scene.addEventListener('exit-vr', () => {
       toggleBtn.classList.remove('hidden');
+      vrHud.setAttribute('visible', false);
     });
   </script>
 </body>
