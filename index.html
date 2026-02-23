@@ -194,18 +194,7 @@
         id="cam"
         position="0 1.6 0"
         look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true"
-        zoom-control
       >
-        <!-- Zoom HUD attached to camera so it follows your gaze -->
-        <a-text
-          id="zoom-text"
-          value=""
-          position="0 -0.35 -1"
-          align="center"
-          color="#ffffff"
-          width="1.5"
-          opacity="0"
-        ></a-text>
       </a-camera>
 
       <!-- Left hand: controller model + hand tracking -->
@@ -223,102 +212,122 @@
       <a-entity
         id="right-hand"
         hand-tracking-controls="hand: right; modelStyle: mesh; modelColor: #ffffff"
-      ></a-entity>
+      >
+        <!-- The Spyglass Lens (attached to right hand) -->
+        <a-circle radius="0.15" position="0 0.1 -0.1" rotation="-30 0 0" spyglass="zoom: 2.0" material="shader: flat" side="double">
+          <!-- Frame ring -->
+          <a-ring radius-inner="0.15" radius-outer="0.16" material="color: #444; shader: flat"></a-ring>
+        </a-circle>
+      </a-entity>
+      
       <a-entity
         id="right-controller"
         laser-controls="hand: right; model: true"
         raycaster="enabled: false"
-      ></a-entity>
+      >
+        <!-- The Spyglass Lens (attached to right controller) -->
+        <a-circle radius="0.15" position="0 0.1 -0.1" rotation="-30 0 0" spyglass="zoom: 2.0" material="shader: flat" side="double">
+          <!-- Frame ring -->
+          <a-ring radius-inner="0.15" radius-outer="0.16" material="color: #444; shader: flat"></a-ring>
+        </a-circle>
+      </a-entity>
     </a-entity>
   </a-scene>
 
   <script>
-    // ── Zoom component: modifies Three.js camera projectionMatrix for real optical zoom ──
-    AFRAME.registerComponent('zoom-control', {
+    // ── Spyglass Component: Renders a zoomed view to a texture on a handheld plane ──
+    AFRAME.registerComponent('spyglass', {
+      schema: {
+        zoom: {type: 'number', default: 2.0}, // e.g. 2x zoom
+        resolution: {type: 'number', default: 1024}
+      },
       init: function () {
-        this.zoom = 1.0;
-        this.targetZoom = 1.0;
-        this.MIN_ZOOM = 1.0;
-        this.MAX_ZOOM = 3.0;
-        this.ZOOM_SPEED = 0.03;
-        this.LERP_SPEED = 8;
-        this.hudTimeout = null;
-        this.zoomText = document.getElementById('zoom-text');
+        const sceneEl = this.el.sceneEl;
+        const renderer = sceneEl.renderer;
 
-        // Controller thumbstick
+        // Create Render Target
+        this.renderTarget = new THREE.WebGLRenderTarget(this.data.resolution, this.data.resolution, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          colorSpace: renderer.outputColorSpace // ensure correct colors
+        });
+
+        // Create Secondary Camera
+        this.magCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000); // 80 base FOV / zoom
+        
+        // Setup Material to show the texture
+        const mesh = this.el.getObject3D('mesh');
+        if (mesh) {
+          mesh.material = new THREE.MeshBasicMaterial({ 
+            map: this.renderTarget.texture,
+            color: 0xffffff,
+            side: THREE.DoubleSide
+          });
+        }
+
+        // State
+        this.active = false;
+        this.el.setAttribute('visible', 'false');
+
+        // Controls
         const rc = document.getElementById('right-controller');
-        const lc = document.getElementById('left-controller');
-        rc.addEventListener('thumbstickmoved', (e) => this.onThumbstick(e));
-        lc.addEventListener('thumbstickmoved', (e) => this.onThumbstick(e));
-
-        // Hand pinch: right = zoom in, left = zoom out
         const rh = document.getElementById('right-hand');
-        const lh = document.getElementById('left-hand');
-        this.leftPinching = false;
-        this.rightPinching = false;
-
-        rh.addEventListener('pinchstarted', () => {
-          this.rightPinching = true;
-          if (!this.leftPinching) {
-            this.targetZoom = Math.min(this.MAX_ZOOM, this.targetZoom + 0.25);
-            this.showHud();
+        
+        // Thumbstick to toggle or change zoom
+        rc.addEventListener('thumbstickmoved', (e) => {
+          if (!this.active) return;
+          const y = e.detail.y;
+          if (Math.abs(y) > 0.1) {
+            this.data.zoom += -y * 0.05;
+            this.data.zoom = Math.max(1.5, Math.min(6.0, this.data.zoom));
+            this.magCamera.fov = 80 / this.data.zoom;
+            this.magCamera.updateProjectionMatrix();
           }
         });
-        rh.addEventListener('pinchended', () => { this.rightPinching = false; });
 
-        lh.addEventListener('pinchstarted', () => {
-          this.leftPinching = true;
-          if (!this.rightPinching) {
-            this.targetZoom = Math.max(this.MIN_ZOOM, this.targetZoom - 0.25);
-            this.showHud();
-          }
-        });
-        lh.addEventListener('pinchended', () => { this.leftPinching = false; });
+        // Pinch or trigger to activate spyglass
+        const toggleSpyglass = () => {
+          this.active = !this.active;
+          this.el.setAttribute('visible', this.active ? 'true' : 'false');
+        };
 
-        // Keyboard zoom for desktop testing: + / -
-        window.addEventListener('keydown', (e) => {
-          if (e.key === '=' || e.key === '+') {
-            this.targetZoom = Math.min(this.MAX_ZOOM, this.targetZoom + 0.25);
-            this.showHud();
-          } else if (e.key === '-') {
-            this.targetZoom = Math.max(this.MIN_ZOOM, this.targetZoom - 0.25);
-            this.showHud();
-          }
-        });
+        rc.addEventListener('triggerdown', toggleSpyglass);
+        rh.addEventListener('pinchstarted', toggleSpyglass);
       },
+      tick: function () {
+        if (!this.active) return;
 
-      onThumbstick: function (evt) {
-        const y = evt.detail.y;
-        if (Math.abs(y) > 0.15) {
-          this.targetZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM,
-            this.targetZoom + (-y * this.ZOOM_SPEED * 2)
-          ));
-          this.showHud();
-        }
-      },
+        const sceneEl = this.el.sceneEl;
+        const renderer = sceneEl.renderer;
+        const cameraEl = document.getElementById('cam');
+        
+        // Align magCamera to this plane's world position/rotation
+        const worldPos = new THREE.Vector3();
+        const worldQuat = new THREE.Quaternion();
+        this.el.object3D.getWorldPosition(worldPos);
+        this.el.object3D.getWorldQuaternion(worldQuat);
 
-      showHud: function () {
-        this.zoomText.setAttribute('opacity', 0.8);
-        this.zoomText.setAttribute('value', 'Zoom: ' + this.targetZoom.toFixed(1) + 'x');
-        clearTimeout(this.hudTimeout);
-        this.hudTimeout = setTimeout(() => {
-          this.zoomText.setAttribute('opacity', 0);
-        }, 2000);
-      },
+        this.magCamera.position.copy(worldPos);
+        this.magCamera.quaternion.copy(worldQuat);
 
-      tick: function (t, dt) {
-        if (!dt) return;
-        const dtSec = dt / 1000;
+        // Hide spyglass mesh itself so it doesn't render into its own texture (infinite hall effect)
+        this.el.object3D.visible = false;
+        
+        // Hide hands/controllers from the spyglass view
+        const rig = document.getElementById('rig');
+        const oldRigVisible = rig.object3D.visible;
+        rig.object3D.visible = false;
 
-        // Smoothly lerp current zoom toward target
-        this.zoom += (this.targetZoom - this.zoom) * Math.min(1, this.LERP_SPEED * dtSec);
+        // Render to texture
+        const currentRenderTarget = renderer.getRenderTarget();
+        renderer.setRenderTarget(this.renderTarget);
+        renderer.render(sceneEl.object3D, this.magCamera);
+        renderer.setRenderTarget(currentRenderTarget);
 
-        // Apply zoom by modifying the Three.js camera zoom property
-        const camera = this.el.getObject3D('camera');
-        if (camera) {
-          camera.zoom = this.zoom;
-          camera.updateProjectionMatrix();
-        }
+        // Restore visibility
+        this.el.object3D.visible = true;
+        rig.object3D.visible = oldRigVisible;
       }
     });
 
