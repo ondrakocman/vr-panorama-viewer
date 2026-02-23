@@ -140,8 +140,8 @@
     <h2>Panorama Settings <button onclick="toggleControls()" style="background:none;border:none;color:#fff;cursor:pointer;font-size:1.2rem;">✕</button></h2>
 
     <label>
-      <span>Sky Radius <b id="val-radius">10</b></span>
-      <input type="range" id="ctrl-radius" min="2" max="500" value="10" step="1">
+      <span>Sky Radius <b id="val-radius">100</b></span>
+      <input type="range" id="ctrl-radius" min="2" max="500" value="100" step="1">
     </label>
     <div class="desc">Smaller = objects feel closer & more intimate. Larger = flat/distant.</div>
 
@@ -184,7 +184,7 @@
       id="sky"
       src="#panorama"
       rotation="0 -90 0"
-      radius="10"
+      radius="100"
       segments-height="128"
       segments-width="128"
     ></a-sky>
@@ -194,7 +194,18 @@
         id="cam"
         position="0 1.6 0"
         look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true"
+        zoom-control
       >
+        <!-- Zoom HUD attached to camera so it follows your gaze -->
+        <a-text
+          id="zoom-text"
+          value=""
+          position="0 -0.35 -1"
+          align="center"
+          color="#ffffff"
+          width="1.5"
+          opacity="0"
+        ></a-text>
       </a-camera>
 
       <!-- Left hand: controller model + hand tracking -->
@@ -219,23 +230,99 @@
         raycaster="enabled: false"
       ></a-entity>
     </a-entity>
-
-    <!-- VR HUD: zoom indicator -->
-    <a-entity id="vr-hud" visible="false">
-      <a-text
-        id="zoom-text"
-        value="Zoom: 1.0x"
-        position="0 2.5 -2"
-        align="center"
-        color="#ffffff"
-        width="3"
-        opacity="0.7"
-        look-at="[camera]"
-      ></a-text>
-    </a-entity>
   </a-scene>
 
   <script>
+    // ── Zoom component: modifies Three.js camera projectionMatrix for real optical zoom ──
+    AFRAME.registerComponent('zoom-control', {
+      init: function () {
+        this.zoom = 1.0;
+        this.targetZoom = 1.0;
+        this.MIN_ZOOM = 1.0;
+        this.MAX_ZOOM = 3.0;
+        this.ZOOM_SPEED = 0.03;
+        this.LERP_SPEED = 8;
+        this.hudTimeout = null;
+        this.zoomText = document.getElementById('zoom-text');
+
+        // Controller thumbstick
+        const rc = document.getElementById('right-controller');
+        const lc = document.getElementById('left-controller');
+        rc.addEventListener('thumbstickmoved', (e) => this.onThumbstick(e));
+        lc.addEventListener('thumbstickmoved', (e) => this.onThumbstick(e));
+
+        // Hand pinch: right = zoom in, left = zoom out
+        const rh = document.getElementById('right-hand');
+        const lh = document.getElementById('left-hand');
+        this.leftPinching = false;
+        this.rightPinching = false;
+
+        rh.addEventListener('pinchstarted', () => {
+          this.rightPinching = true;
+          if (!this.leftPinching) {
+            this.targetZoom = Math.min(this.MAX_ZOOM, this.targetZoom + 0.25);
+            this.showHud();
+          }
+        });
+        rh.addEventListener('pinchended', () => { this.rightPinching = false; });
+
+        lh.addEventListener('pinchstarted', () => {
+          this.leftPinching = true;
+          if (!this.rightPinching) {
+            this.targetZoom = Math.max(this.MIN_ZOOM, this.targetZoom - 0.25);
+            this.showHud();
+          }
+        });
+        lh.addEventListener('pinchended', () => { this.leftPinching = false; });
+
+        // Keyboard zoom for desktop testing: + / -
+        window.addEventListener('keydown', (e) => {
+          if (e.key === '=' || e.key === '+') {
+            this.targetZoom = Math.min(this.MAX_ZOOM, this.targetZoom + 0.25);
+            this.showHud();
+          } else if (e.key === '-') {
+            this.targetZoom = Math.max(this.MIN_ZOOM, this.targetZoom - 0.25);
+            this.showHud();
+          }
+        });
+      },
+
+      onThumbstick: function (evt) {
+        const y = evt.detail.y;
+        if (Math.abs(y) > 0.15) {
+          this.targetZoom = Math.max(this.MIN_ZOOM, Math.min(this.MAX_ZOOM,
+            this.targetZoom + (-y * this.ZOOM_SPEED * 2)
+          ));
+          this.showHud();
+        }
+      },
+
+      showHud: function () {
+        this.zoomText.setAttribute('opacity', 0.8);
+        this.zoomText.setAttribute('value', 'Zoom: ' + this.targetZoom.toFixed(1) + 'x');
+        clearTimeout(this.hudTimeout);
+        this.hudTimeout = setTimeout(() => {
+          this.zoomText.setAttribute('opacity', 0);
+        }, 2000);
+      },
+
+      tick: function (t, dt) {
+        if (!dt) return;
+        const dtSec = dt / 1000;
+
+        // Smoothly lerp current zoom toward target
+        this.zoom += (this.targetZoom - this.zoom) * Math.min(1, this.LERP_SPEED * dtSec);
+
+        // Apply zoom by modifying the Three.js camera zoom property
+        const camera = this.el.getObject3D('camera');
+        if (camera) {
+          camera.zoom = this.zoom;
+          camera.updateProjectionMatrix();
+        }
+      }
+    });
+
+    // ── App logic ──
     const loadingScreen = document.getElementById('loading-screen');
     const hint = document.getElementById('enter-vr-hint');
     const scene = document.querySelector('a-scene');
@@ -244,109 +331,8 @@
     const cam = document.getElementById('cam');
     const controlsPanel = document.getElementById('controls');
     const toggleBtn = document.getElementById('toggle-btn');
-    const vrHud = document.getElementById('vr-hud');
-    const zoomText = document.getElementById('zoom-text');
-
-    // Zoom state
-    let currentZoom = 1.0;
-    const MIN_ZOOM = 0.5;
-    const MAX_ZOOM = 4.0;
-    const ZOOM_SPEED = 0.02;
-    let zoomHudTimeout = null;
-    let baseRadius = 10;
-
-    function applyZoom() {
-      currentZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom));
-      const newRadius = baseRadius / currentZoom;
-      sky.setAttribute('radius', newRadius);
-      zoomText.setAttribute('value', 'Zoom: ' + currentZoom.toFixed(1) + 'x');
-      showZoomHud();
-    }
-
-    function showZoomHud() {
-      vrHud.setAttribute('visible', true);
-      clearTimeout(zoomHudTimeout);
-      zoomHudTimeout = setTimeout(() => {
-        vrHud.setAttribute('visible', false);
-      }, 1500);
-    }
-
-    // Thumbstick zoom (controllers)
-    const rightController = document.getElementById('right-controller');
-    const leftController = document.getElementById('left-controller');
-
-    rightController.addEventListener('thumbstickmoved', (evt) => {
-      const y = evt.detail.y;
-      if (Math.abs(y) > 0.1) {
-        currentZoom += -y * ZOOM_SPEED * 2;
-        applyZoom();
-      }
-    });
-
-    leftController.addEventListener('thumbstickmoved', (evt) => {
-      const y = evt.detail.y;
-      if (Math.abs(y) > 0.1) {
-        currentZoom += -y * ZOOM_SPEED * 2;
-        applyZoom();
-      }
-    });
-
-    // Pinch zoom (hand tracking)
-    let lastPinchDistance = null;
-
-    const leftHand = document.getElementById('left-hand');
-    const rightHand = document.getElementById('right-hand');
-
-    let leftPinching = false;
-    let rightPinching = false;
-    let leftPos = null;
-    let rightPos = null;
-
-    leftHand.addEventListener('pinchstarted', () => { leftPinching = true; });
-    leftHand.addEventListener('pinchended', () => { leftPinching = false; lastPinchDistance = null; });
-    rightHand.addEventListener('pinchstarted', () => { rightPinching = true; });
-    rightHand.addEventListener('pinchended', () => { rightPinching = false; lastPinchDistance = null; });
-
-    leftHand.addEventListener('pinchmoved', (evt) => {
-      leftPos = evt.detail.position;
-      handleTwoHandPinch();
-    });
-    rightHand.addEventListener('pinchmoved', (evt) => {
-      rightPos = evt.detail.position;
-      handleTwoHandPinch();
-    });
-
-    function handleTwoHandPinch() {
-      if (leftPinching && rightPinching && leftPos && rightPos) {
-        const dx = leftPos.x - rightPos.x;
-        const dy = leftPos.y - rightPos.y;
-        const dz = leftPos.z - rightPos.z;
-        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        if (lastPinchDistance !== null) {
-          const delta = dist - lastPinchDistance;
-          currentZoom += delta * 3;
-          applyZoom();
-        }
-        lastPinchDistance = dist;
-      }
-    }
-
-    // Trigger zoom: single-hand pinch on right hand = zoom in, left = zoom out
-    rightHand.addEventListener('pinchstarted', () => {
-      if (!leftPinching) {
-        currentZoom += 0.2;
-        applyZoom();
-      }
-    });
-    leftHand.addEventListener('pinchstarted', () => {
-      if (!rightPinching) {
-        currentZoom -= 0.2;
-        applyZoom();
-      }
-    });
 
     function toggleControls() {
-      const isHidden = controlsPanel.classList.contains('hidden');
       controlsPanel.classList.toggle('hidden');
       toggleBtn.classList.toggle('hidden', !controlsPanel.classList.contains('hidden'));
     }
@@ -354,11 +340,10 @@
     // Sky radius
     document.getElementById('ctrl-radius').addEventListener('input', function() {
       document.getElementById('val-radius').textContent = this.value;
-      baseRadius = parseFloat(this.value);
-      sky.setAttribute('radius', baseRadius / currentZoom);
+      sky.setAttribute('radius', parseFloat(this.value));
     });
 
-    // Segments (need to rebuild geometry)
+    // Segments
     document.getElementById('ctrl-segments').addEventListener('input', function() {
       const v = parseInt(this.value);
       document.getElementById('val-segments').textContent = v;
@@ -389,12 +374,8 @@
     img.addEventListener('load', () => {
       loadingScreen.classList.add('hidden');
       toggleBtn.classList.remove('hidden');
-      setTimeout(() => {
-        hint.classList.add('visible');
-      }, 500);
-      setTimeout(() => {
-        hint.classList.remove('visible');
-      }, 6000);
+      setTimeout(() => { hint.classList.add('visible'); }, 500);
+      setTimeout(() => { hint.classList.remove('visible'); }, 6000);
     });
 
     // Fallback: hide loading screen when scene is loaded
@@ -403,13 +384,11 @@
         loadingScreen.classList.add('hidden');
         toggleBtn.classList.remove('hidden');
         hint.classList.add('visible');
-        setTimeout(() => {
-          hint.classList.remove('visible');
-        }, 6000);
+        setTimeout(() => { hint.classList.remove('visible'); }, 6000);
       }, 1000);
     });
 
-    // Hide controls when entering VR, show HUD
+    // Hide controls when entering VR
     scene.addEventListener('enter-vr', () => {
       hint.classList.remove('visible');
       controlsPanel.classList.add('hidden');
@@ -419,7 +398,6 @@
     // Show toggle button when exiting VR
     scene.addEventListener('exit-vr', () => {
       toggleBtn.classList.remove('hidden');
-      vrHud.setAttribute('visible', false);
     });
   </script>
 </body>
