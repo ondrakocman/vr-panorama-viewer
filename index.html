@@ -195,6 +195,16 @@
         position="0 1.6 0"
         look-controls="magicWindowTrackingEnabled: true; touchEnabled: true; mouseEnabled: true"
       >
+        <!-- Center HUD for zoom percentage -->
+        <a-text
+          id="zoom-text"
+          value=""
+          position="0 -0.35 -1"
+          align="center"
+          color="#ffffff"
+          width="1.5"
+          opacity="0"
+        ></a-text>
       </a-camera>
 
       <!-- Left hand: controller model + hand tracking -->
@@ -212,126 +222,16 @@
       <a-entity
         id="right-hand"
         hand-tracking-controls="hand: right; modelStyle: mesh; modelColor: #ffffff"
-      >
-        <!-- The Spyglass Lens (attached to right hand) -->
-        <a-circle radius="0.15" position="0 0.1 -0.1" rotation="-30 0 0" spyglass="zoom: 2.0" material="shader: flat" side="double">
-          <!-- Frame ring -->
-          <a-ring radius-inner="0.15" radius-outer="0.16" material="color: #444; shader: flat"></a-ring>
-        </a-circle>
-      </a-entity>
-      
+      ></a-entity>
       <a-entity
         id="right-controller"
         laser-controls="hand: right; model: true"
         raycaster="enabled: false"
-      >
-        <!-- The Spyglass Lens (attached to right controller) -->
-        <a-circle radius="0.15" position="0 0.1 -0.1" rotation="-30 0 0" spyglass="zoom: 2.0" material="shader: flat" side="double">
-          <!-- Frame ring -->
-          <a-ring radius-inner="0.15" radius-outer="0.16" material="color: #444; shader: flat"></a-ring>
-        </a-circle>
-      </a-entity>
+      ></a-entity>
     </a-entity>
   </a-scene>
 
   <script>
-    // ── Spyglass Component: Renders a zoomed view to a texture on a handheld plane ──
-    AFRAME.registerComponent('spyglass', {
-      schema: {
-        zoom: {type: 'number', default: 2.0}, // e.g. 2x zoom
-        resolution: {type: 'number', default: 1024}
-      },
-      init: function () {
-        const sceneEl = this.el.sceneEl;
-        const renderer = sceneEl.renderer;
-
-        // Create Render Target
-        this.renderTarget = new THREE.WebGLRenderTarget(this.data.resolution, this.data.resolution, {
-          minFilter: THREE.LinearFilter,
-          magFilter: THREE.LinearFilter,
-          format: THREE.RGBAFormat,
-          colorSpace: renderer.outputColorSpace // ensure correct colors
-        });
-
-        // Create Secondary Camera
-        this.magCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000); // 80 base FOV / zoom
-        
-        // Setup Material to show the texture
-        const mesh = this.el.getObject3D('mesh');
-        if (mesh) {
-          mesh.material = new THREE.MeshBasicMaterial({ 
-            map: this.renderTarget.texture,
-            color: 0xffffff,
-            side: THREE.DoubleSide
-          });
-        }
-
-        // State
-        this.active = false;
-        this.el.setAttribute('visible', 'false');
-
-        // Controls
-        const rc = document.getElementById('right-controller');
-        const rh = document.getElementById('right-hand');
-        
-        // Thumbstick to toggle or change zoom
-        rc.addEventListener('thumbstickmoved', (e) => {
-          if (!this.active) return;
-          const y = e.detail.y;
-          if (Math.abs(y) > 0.1) {
-            this.data.zoom += -y * 0.05;
-            this.data.zoom = Math.max(1.5, Math.min(6.0, this.data.zoom));
-            this.magCamera.fov = 80 / this.data.zoom;
-            this.magCamera.updateProjectionMatrix();
-          }
-        });
-
-        // Pinch or trigger to activate spyglass
-        const toggleSpyglass = () => {
-          this.active = !this.active;
-          this.el.setAttribute('visible', this.active ? 'true' : 'false');
-        };
-
-        rc.addEventListener('triggerdown', toggleSpyglass);
-        rh.addEventListener('pinchstarted', toggleSpyglass);
-      },
-      tick: function () {
-        if (!this.active) return;
-
-        const sceneEl = this.el.sceneEl;
-        const renderer = sceneEl.renderer;
-        const cameraEl = document.getElementById('cam');
-        
-        // Align magCamera to this plane's world position/rotation
-        const worldPos = new THREE.Vector3();
-        const worldQuat = new THREE.Quaternion();
-        this.el.object3D.getWorldPosition(worldPos);
-        this.el.object3D.getWorldQuaternion(worldQuat);
-
-        this.magCamera.position.copy(worldPos);
-        this.magCamera.quaternion.copy(worldQuat);
-
-        // Hide spyglass mesh itself so it doesn't render into its own texture (infinite hall effect)
-        this.el.object3D.visible = false;
-        
-        // Hide hands/controllers from the spyglass view
-        const rig = document.getElementById('rig');
-        const oldRigVisible = rig.object3D.visible;
-        rig.object3D.visible = false;
-
-        // Render to texture
-        const currentRenderTarget = renderer.getRenderTarget();
-        renderer.setRenderTarget(this.renderTarget);
-        renderer.render(sceneEl.object3D, this.magCamera);
-        renderer.setRenderTarget(currentRenderTarget);
-
-        // Restore visibility
-        this.el.object3D.visible = true;
-        rig.object3D.visible = oldRigVisible;
-      }
-    });
-
-    // ── App logic ──
     const loadingScreen = document.getElementById('loading-screen');
     const hint = document.getElementById('enter-vr-hint');
     const scene = document.querySelector('a-scene');
@@ -340,6 +240,91 @@
     const cam = document.getElementById('cam');
     const controlsPanel = document.getElementById('controls');
     const toggleBtn = document.getElementById('toggle-btn');
+    const zoomText = document.getElementById('zoom-text');
+
+    // Zoom state
+    let currentZoom = 1.0;
+    const MIN_ZOOM = 1.0;
+    const MAX_ZOOM = 5.0;
+    let baseRadius = 100;
+    let hudTimeout = null;
+
+    function showZoomHud() {
+      if (!zoomText) return;
+      zoomText.setAttribute('opacity', 0.8);
+      zoomText.setAttribute('value', 'Zoom: ' + currentZoom.toFixed(1) + 'x');
+      clearTimeout(hudTimeout);
+      hudTimeout = setTimeout(() => {
+        zoomText.setAttribute('opacity', 0);
+      }, 1500);
+    }
+
+    function applyZoom() {
+      // In WebXR, we must scale the sky to simulate zoom,
+      // but to reduce nausea, we scale it very carefully around the camera
+      sky.setAttribute('radius', baseRadius / currentZoom);
+      showZoomHud();
+    }
+
+    // Two-hand pinch zoom logic
+    const leftHand = document.getElementById('left-hand');
+    const rightHand = document.getElementById('right-hand');
+    
+    let leftPinching = false;
+    let rightPinching = false;
+    let leftPos = new THREE.Vector3();
+    let rightPos = new THREE.Vector3();
+    let initialPinchDistance = null;
+    let initialZoomAtPinch = 1.0;
+
+    leftHand.addEventListener('pinchstarted', () => { leftPinching = true; checkTwoHandPinch(); });
+    leftHand.addEventListener('pinchended', () => { leftPinching = false; initialPinchDistance = null; });
+    
+    rightHand.addEventListener('pinchstarted', () => { 
+      rightPinching = true; 
+      
+      // If ONLY right hand is pinching, reset zoom
+      setTimeout(() => {
+        if (rightPinching && !leftPinching) {
+          currentZoom = 1.0;
+          applyZoom();
+        }
+      }, 100); // small delay to see if left hand also pinches
+
+      checkTwoHandPinch(); 
+    });
+    rightHand.addEventListener('pinchended', () => { rightPinching = false; initialPinchDistance = null; });
+
+    leftHand.addEventListener('pinchmoved', (evt) => {
+      leftPos.copy(evt.detail.position);
+      handleTwoHandPinch();
+    });
+    
+    rightHand.addEventListener('pinchmoved', (evt) => {
+      rightPos.copy(evt.detail.position);
+      handleTwoHandPinch();
+    });
+
+    function checkTwoHandPinch() {
+      if (leftPinching && rightPinching) {
+        initialPinchDistance = leftPos.distanceTo(rightPos);
+        initialZoomAtPinch = currentZoom;
+      }
+    }
+
+    function handleTwoHandPinch() {
+      if (leftPinching && rightPinching && initialPinchDistance !== null) {
+        const currentDist = leftPos.distanceTo(rightPos);
+        // Calculate zoom multiplier based on distance change
+        // E.g., if hands move 2x further apart, zoom increases
+        const delta = currentDist - initialPinchDistance;
+        
+        currentZoom = initialZoomAtPinch + (delta * 5.0); // 5.0 is sensitivity multiplier
+        currentZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom));
+        
+        applyZoom();
+      }
+    }
 
     function toggleControls() {
       controlsPanel.classList.toggle('hidden');
